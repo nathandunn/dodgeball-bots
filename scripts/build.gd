@@ -27,10 +27,10 @@ const PROP_HELP := {
 # calibration: how strongly each property's skill swings its game numbers (1.0 = the
 # designed span). Tuned by tools/calibrate.py so that specialising in any one property beats
 # an even split about half the time.
-const GAINS := {"speed": 0.880, "arm": 0.570, "aim": 5.000, "hands": 0.770, "dodge": 0.470}
+const GAINS := {"speed": 0.910, "arm": 0.580, "aim": 5.000, "hands": 0.740, "dodge": 0.450}
 # calibration: how hard it hurts to starve a property (the exponent below the midpoint).
 # 1 = linear; smaller = gentler, so specialists who dump the rest are not crippled by it.
-const CURVE := 0.298
+const CURVE := 0.310
 
 const PRESETS := {
 	"Even":      {"speed": 0.20, "arm": 0.20, "aim": 0.20, "hands": 0.20, "dodge": 0.20},
