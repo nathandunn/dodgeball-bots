@@ -244,13 +244,16 @@ func _on_match_ended(result: Dictionary) -> void:
 		if result["winner"] < 0 or not manager.celebrating:
 			get_tree().create_timer(1.2).timeout.connect(func(): _show_results(result["match"]))
 		else:
-			# the panel comes up as the dance starts; a safety timer in case the winners dawdle
-			get_tree().create_timer(GATHER_SAFETY).timeout.connect(func(): _show_results(result["match"]))
+			# let the winners finish dancing and mooning before the results panel covers half the
+			# screen - it used to pop up the moment the dance started, which meant it was already
+			# sitting over the court by the time anyone got to the mooning. CELEB_SAFETY is just a
+			# fallback in case the celebration signal never fires (a stuck celebrant, say).
+			get_tree().create_timer(CELEB_SAFETY).timeout.connect(func(): _show_results(result["match"]))
 	elif headless:
 		print(JSON.stringify(result))
 
 
-const GATHER_SAFETY := 9.0
+const CELEB_SAFETY := 20.0
 var _results_shown_for := -1
 
 func _show_results(idx: int) -> void:
@@ -261,15 +264,17 @@ func _show_results(idx: int) -> void:
 
 
 func _on_dance_started(idx: int) -> void:
-	if batch_left > 0:
-		return
-	_show_results(idx)
+	pass  # results now wait for the whole celebration to finish - see _on_celebration_finished
 
 
 func _on_celebration_finished(idx: int) -> void:
 	if headless and OS.has_environment("DBCELEB"):
 		print("celebration finished for game %d" % idx)
 		get_tree().quit()
+		return
+	if batch_left > 0:
+		return
+	_show_results(idx)
 
 
 func _summarize(results: Array[Dictionary]) -> Dictionary:

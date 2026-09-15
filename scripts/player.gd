@@ -76,6 +76,7 @@ var ragdoll: Ragdoll = null
 var _down_timer := 0.0
 const DOWN_TIME := 2.4
 # --- celebration (winners): "gather" -> "dance" -> "moon" -> "done"
+const MOON_HIP_PIVOT := 0.85  # bend the torso about hip height, not about the feet
 var celebrating := false
 var celeb_spot := Vector3.ZERO
 var _celeb_t := 0.0
@@ -84,6 +85,7 @@ var _skin_mat: StandardMaterial3D          # aim test: stands still, only reacts
 
 # --- body
 var body_root: Node3D
+var moon_cheeks: Node3D
 var arm_r: MeshInstance3D
 var arm_l: MeshInstance3D
 var leg_l: Node3D
@@ -165,6 +167,36 @@ func _build_body() -> void:
 	eye.material_override = em
 	eye.position = Vector3(0, 1.7, -0.16)
 	body_root.add_child(eye)
+
+	# a moon needs something to show: two pale cheeks on the seat of the pants, hidden until
+	# the mooning pose calls for them (see _celebrate, phase "moon"). A little emission on them
+	# means they still read clearly even if the pose lands them in a shadow.
+	var moon_skin := StandardMaterial3D.new()
+	moon_skin.albedo_color = Color(0.95, 0.8, 0.68)
+	moon_skin.emission_enabled = true
+	moon_skin.emission = Color(0.95, 0.8, 0.68)
+	moon_skin.emission_energy_multiplier = 0.35
+	moon_cheeks = Node3D.new()
+	moon_cheeks.position = Vector3(0, 0.86, 0.22)
+	moon_cheeks.visible = false
+	body_root.add_child(moon_cheeks)
+	var cheek_mesh := SphereMesh.new()
+	cheek_mesh.radius = 0.13
+	cheek_mesh.height = 0.22
+	cheek_mesh.radial_segments = 10
+	cheek_mesh.rings = 6
+	for side in [-1.0, 1.0]:
+		var cheek := MeshInstance3D.new()
+		cheek.mesh = cheek_mesh
+		cheek.material_override = moon_skin
+		cheek.position = Vector3(side * 0.12, 0, 0)
+		cheek.scale = Vector3(0.9, 1.0, 0.75)
+		moon_cheeks.add_child(cheek)
+	var crack := MeshInstance3D.new()
+	crack.mesh = _box(Vector3(0.02, 0.2, 0.03))
+	crack.material_override = _dark_mat
+	crack.position = Vector3(0, 0.0, 0.05)
+	moon_cheeks.add_child(crack)
 
 	label = Label3D.new()
 	label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
@@ -906,6 +938,8 @@ func cheer(spot: Vector3) -> void:
 	_celeb_t = rng.randf() * 2.0
 	_dodge_timer = 0.0
 	_windup = 0.0
+	if moon_cheeks != null:
+		moon_cheeks.visible = false
 	if ragdoll != null:
 		_get_up()
 
@@ -915,11 +949,13 @@ func _celebrate(delta: float) -> void:
 	_celeb_t += delta
 	action = phase
 	if phase == "gather":
+		moon_cheeks.visible = false
 		_walk(delta, celeb_spot, 1.0)
 		body_root.rotation = Vector3.ZERO
 		body_root.position = Vector3.ZERO
 		_animate(delta)
 	elif phase == "dance":
+		moon_cheeks.visible = false
 		velocity = Vector3.ZERO
 		_face(Vector3(-_sign() * 6.0, 0, global_position.z), delta)  # face the losers
 		var beat: float = manager.dance_clock
@@ -931,10 +967,11 @@ func _celebrate(delta: float) -> void:
 		leg_l.rotation.x = sin(beat * 6.0) * 0.3
 		leg_r.rotation.x = -sin(beat * 6.0) * 0.3
 	elif phase == "moon":
-		# up to the line, backs to the beaten, bend over
+		# up to the line, backs to the beaten, bend right over and show them what they lost to
 		var d := celeb_spot - global_position
 		d.y = 0.0
 		if d.length() > 0.3:
+			moon_cheeks.visible = false
 			_walk(delta, celeb_spot, 1.0)
 			body_root.rotation = Vector3.ZERO
 			body_root.position = Vector3.ZERO
@@ -942,18 +979,30 @@ func _celebrate(delta: float) -> void:
 		else:
 			velocity = Vector3.ZERO
 			_face(Vector3(_sign() * 20.0, 0, global_position.z), delta)  # back to the enemy half
-			body_root.rotation.x = lerpf(body_root.rotation.x, 1.25, delta * 5.0)  # bent double
+			# NOTE: the sign here matters more than it looks. +rotation.x swings the FRONT of the
+			# torso (where the eye decal is) up to face the sky and the seat down into the floor -
+			# a backbend that shows the enemy nothing. Bending the other way (-1.48) swings the
+			# face down toward the ground in front of the player and the seat up to face the sky -
+			# an actual forward bend, which is the only direction that puts the cheeks camera-side.
+			body_root.rotation.x = lerpf(body_root.rotation.x, -1.48, delta * 6.0)  # bent right double
 			body_root.rotation.z = sin(_celeb_t * 9.0) * 0.12                       # a waggle
-			body_root.position.y = -0.15
-			body_root.position.z = 0.25
-			arm_l.rotation.x = 0.4
-			arm_r.rotation.x = 0.4
+			# body_root's own origin sits at ground level (the feet), but a bend-at-the-waist
+			# pivots around the hips - so rotating body_root about its own origin used to swing
+			# the whole torso (and the cheeks riding on it) down through the floor. Solve for the
+			# position offset that keeps the hip-height point fixed in place as rotation.x sweeps in.
+			var bend: float = body_root.rotation.x
+			body_root.position.y = MOON_HIP_PIVOT * (1.0 - cos(bend))
+			body_root.position.z = -MOON_HIP_PIVOT * sin(bend)
+			arm_l.rotation.x = -0.4
+			arm_r.rotation.x = -0.4
 			leg_l.rotation.x = 0.0
 			leg_r.rotation.x = 0.0
+			moon_cheeks.visible = bend < -1.0  # only once bent over enough to show
 	else:
 		velocity = Vector3.ZERO
 		body_root.rotation = Vector3.ZERO
 		body_root.position = Vector3.ZERO
+		moon_cheeks.visible = false
 		_animate(delta)
 
 
