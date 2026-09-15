@@ -88,9 +88,11 @@ func _physics_process(delta: float) -> void:
 		_rest_timer += delta
 		if _rest_timer > 0.05:
 			set_dead()
-	# a ball that leaves the court (over a sideline or end line) belongs to the side it left from
+	# a ball that comes to rest outside the lines is out of play; the side it left from gets it
+	# back on their own court (players stay inside the lines and cannot fetch it, so a ball left
+	# out there would stall the game)
 	if not live and holder == null and manager != null:
-		if absf(global_position.z) > Court.HALF_WID + 0.9 or absf(global_position.x) > Court.HALF_LEN + 0.9:
+		if absf(global_position.z) > Court.HALF_WID + 0.2 or absf(global_position.x) > Court.HALF_LEN + 0.2:
 			if linear_velocity.length() < 1.0:
 				manager.return_ball(self)
 

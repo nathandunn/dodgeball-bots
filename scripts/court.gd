@@ -2,7 +2,7 @@ class_name Court
 extends Node3D
 ## A regulation 60 x 30 ft court (18.3 x 9.1 m) built in code: centre line, a 4 ft neutral
 ## zone, attack lines 10 ft from centre, end lines, and a low wall a couple of metres outside
-## the sidelines so balls stop. Red plays x < 0, Blue x > 0.
+## the sidelines so balls stop (glass, so the view is never blocked). Red plays x < 0, Blue x > 0.
 
 const HALF_LEN := 9.15      # centre line to end line (30 ft)
 const HALF_WID := 4.57      # centre to sideline (15 ft)
@@ -56,7 +56,9 @@ func _ready() -> void:
 		add_child(q)
 
 	var wall_mat := StandardMaterial3D.new()
-	wall_mat.albedo_color = Color(0.25, 0.27, 0.32)
+	wall_mat.albedo_color = Color(0.55, 0.62, 0.75, 0.18)  # glass: the court must read through it
+	wall_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	wall_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	var t := 0.4
 	var lx := HALF_LEN + MARGIN
 	var lz := HALF_WID + MARGIN

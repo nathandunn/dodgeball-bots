@@ -70,7 +70,17 @@ var last_throw_time := -10.0
 var last_target: Player = null
 var speed_scale := 1.0
 var avg_vel := Vector3.ZERO     # smoothed, for throwers leading this player
-var dummy := false          # aim test: stands still, only reacts to incoming balls
+var dummy := false
+# --- flattened: a hit sends the body flying as a ragdoll for a moment before the walk of shame
+var ragdoll: Ragdoll = null
+var _down_timer := 0.0
+const DOWN_TIME := 2.4
+# --- celebration (winners): "gather" -> "dance" -> "moon" -> "done"
+var celebrating := false
+var celeb_spot := Vector3.ZERO
+var _celeb_t := 0.0
+var _dark_mat: StandardMaterial3D
+var _skin_mat: StandardMaterial3D          # aim test: stands still, only reacts to incoming balls
 
 # --- body
 var body_root: Node3D
@@ -86,7 +96,9 @@ var _flash_tween: Tween
 
 func _ready() -> void:
 	collision_layer = LAYER_PLAYERS
-	collision_mask = LAYER_WORLD | LAYER_PLAYERS
+	# players do not body-block each other (a fetcher wedged behind a standing mate stalls the
+	# game); the keep-off force in _physics_process spaces them out instead
+	collision_mask = LAYER_WORLD
 	motion_mode = CharacterBody3D.MOTION_MODE_FLOATING
 	if rng == null:
 		rng = RandomNumberGenerator.new()
@@ -136,6 +148,8 @@ func _build_body() -> void:
 	dark.roughness = 0.8
 	var skin := StandardMaterial3D.new()
 	skin.albedo_color = Color(0.9, 0.75, 0.6)
+	_dark_mat = dark
+	_skin_mat = skin
 
 	_mesh_part(_box(Vector3(0.5, 0.62, 0.3)), Vector3(0, 1.12, 0), _mat)
 	_mesh_part(_box(Vector3(0.3, 0.3, 0.3)), Vector3(0, 1.66, 0), skin)
@@ -202,12 +216,8 @@ func _capsule(r: float, h: float) -> CapsuleMesh:
 func _update_label() -> void:
 	if label == null:
 		return
-	if out:
-		label.text = player_name + " OUT"
-		label.modulate = Color(0.6, 0.6, 0.6)
-	else:
-		label.text = "%s %s" % [player_name, build.label()]
-		label.modulate = Color.WHITE
+	label.text = "%s %s" % [player_name, build.label()]
+	label.modulate = Color(0.6, 0.6, 0.6) if out else Color.WHITE
 
 
 func flash(c: Color) -> void:
@@ -221,12 +231,30 @@ func flash(c: Color) -> void:
 # ---------------------------------------------------------------- loop
 
 func _physics_process(delta: float) -> void:
-	if manager == null or not manager.running:
+	if manager == null or (not manager.running and not manager.celebrating):
 		velocity = Vector3.ZERO
+		if ragdoll != null:
+			_follow_ragdoll()
 		_animate(delta)
+		return
+	if ragdoll != null:
+		# flat on the boards: ride the ragdoll until it settles, then get up where it lies
+		_down_timer -= delta
+		_follow_ragdoll()
+		if _down_timer <= 0.0:
+			_get_up()
+		return
+	if _stagger > 0.0:
+		_stagger -= delta
+	if celebrating:
+		_celebrate(delta)
 		return
 	if out:
 		_walk(delta, _walk_to, 0.75)
+		_animate(delta)
+		return
+	if not manager.running:
+		velocity = Vector3.ZERO
 		_animate(delta)
 		return
 	if inbound:
@@ -239,8 +267,6 @@ func _physics_process(delta: float) -> void:
 		return
 
 	throw_timer = maxf(throw_timer - delta, 0.0)
-	if _stagger > 0.0:
-		_stagger -= delta
 	if held != null:
 		hold_timer += delta
 		held.global_position = to_global(HAND_POS)
@@ -301,7 +327,12 @@ func _physics_process(delta: float) -> void:
 	var p := global_position
 	var pad := 0.3
 	p.z = clampf(p.z, -Court.HALF_WID + pad, Court.HALF_WID - pad)
-	var edge := 0.05 if (rush_ball != null and is_instance_valid(rush_ball) and rush_ball.idle()) else Court.NEUTRAL + 0.1
+	# the neutral zone may be entered to collect a loose ball (never the far half)
+	var edge := Court.NEUTRAL + 0.1
+	if rush_ball != null and is_instance_valid(rush_ball) and rush_ball.idle():
+		edge = 0.05
+	elif claim != null and is_instance_valid(claim) and claim.idle() and absf(claim.global_position.x) < Court.NEUTRAL + 0.3:
+		edge = 0.05
 	if team == 0:
 		p.x = clampf(p.x, -Court.HALF_LEN + pad, -edge)
 	else:
@@ -490,11 +521,11 @@ func _best_ball() -> Ball:
 		if not b.idle():
 			continue
 		var bp: Vector3 = b.global_position
-		var own_side := (bp.x < Court.NEUTRAL) if team == 0 else (bp.x > -Court.NEUTRAL)
+		var own_side := (bp.x < 0.05) if team == 0 else (bp.x > -0.05)  # the centre-line balls count for both
 		if not own_side:
 			continue
-		if absf(bp.z) > Court.HALF_WID + 1.0 or absf(bp.x) > Court.HALF_LEN + 1.0:
-			continue
+		if absf(bp.z) > Court.HALF_WID + 0.2 or absf(bp.x) > Court.HALF_LEN + 0.2:
+			continue  # outside the lines: it comes back on its own, do not stand at the line waiting
 		var cost := global_position.distance_to(bp)
 		if b == rush_ball:
 			cost -= 3.0
@@ -654,13 +685,12 @@ func consider(b: Ball) -> void:
 	var miss := Vector2(at.z - me.z, at.y - 1.0).length()
 	if miss > 1.1:
 		return
-	# a clean release reads late: the sharpshooter's ball is on you before you know it
+	# everyone who sees the ball tries to get out of its way; what differs is how soon they move.
+	# A clean release (the thrower's aim) reads late; sharp eyes (dodge) and caution read it sooner.
 	var disguise := 0.3 * clampf(b.thrower.build.skill("aim"), 0.0, 3.1)
-	var noticed := rng.randf() < (0.45 + 0.55 * notice_skill * (0.6 + 0.4 * personality.get_trait("caution"))) * (1.0 - disguise)
-	if not noticed:
-		_noticed[b] = {"t": 99.0, "armed": true, "mode": "blind", "thrower": b.thrower, "counted": true}
-		return
-	_noticed[b] = {"t": react_time * rng.randf_range(0.8, 1.2), "armed": false, "mode": "", "thrower": b.thrower, "tti": tti, "miss": miss}
+	var eyes := clampf(0.6 + 0.4 * notice_skill + 0.15 * personality.get_trait("caution"), 0.6, 1.2)
+	var t := react_time * rng.randf_range(0.85, 1.15) * (1.0 + 1.6 * disguise) / eyes
+	_noticed[b] = {"t": t, "armed": false, "mode": "", "thrower": b.thrower, "tti": tti, "miss": miss}
 
 
 func _react(b: Ball, n: Dictionary) -> void:
@@ -784,7 +814,147 @@ func _eliminate(by: Player, how: String, b: Ball) -> void:
 		hb.hot = false
 	flash(Color(1.0, 0.2, 0.2))
 	_update_label()
+	if how != "caught":
+		_splat(b)
 	eliminated.emit(self, by, how)
+
+
+## The ball lands: a burst of colour where it struck and the body goes flying.
+func _splat(b: Ball) -> void:
+	var at := b.global_position if is_inside_tree() and b.is_inside_tree() else global_position + Vector3(0, 1.0, 0)
+	var vel: Vector3 = b.linear_velocity
+	if vel.length() < 1.0:
+		vel = -_enemy_dir() * 12.0
+	_spawn_ragdoll()
+	if ragdoll != null:
+		var dir := Vector3(vel.x, 0, vel.z).normalized()
+		ragdoll.shove(dir * (28.0 + vel.length() * 1.2) + Vector3(0, 9.0 + rng.randf() * 5.0, 0))
+	_down_timer = DOWN_TIME
+	_burst(at)
+
+
+func _burst(at: Vector3) -> void:
+	if manager == null or manager.world == null:
+		return
+	var p := CPUParticles3D.new()
+	p.emitting = false
+	p.one_shot = true
+	p.amount = 40
+	p.lifetime = 0.7
+	p.explosiveness = 1.0
+	p.direction = Vector3(0, 1, 0)
+	p.spread = 180.0
+	p.initial_velocity_min = 2.5
+	p.initial_velocity_max = 7.0
+	p.gravity = Vector3(0, -9.8, 0)
+	p.scale_amount_min = 0.6
+	p.scale_amount_max = 1.4
+	var m := SphereMesh.new()
+	m.radius = 0.06
+	m.height = 0.12
+	m.radial_segments = 6
+	m.rings = 3
+	p.mesh = m
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(1.0, 0.35, 0.2)
+	mat.emission_enabled = true
+	mat.emission = Color(0.9, 0.25, 0.1)
+	p.material_override = mat
+	manager.world.add_child(p)
+	p.global_position = at
+	p.emitting = true
+	get_tree().create_timer(1.2).timeout.connect(p.queue_free)
+
+
+func _spawn_ragdoll() -> void:
+	if ragdoll != null or manager == null or manager.world == null:
+		return
+	ragdoll = Ragdoll.new()
+	manager.world.add_child(ragdoll)
+	var pose := global_transform
+	pose.origin.y = 0.0
+	ragdoll.build(pose, _mat, _dark_mat, _skin_mat)
+	body_root.visible = false
+	label.visible = false
+
+
+func _follow_ragdoll() -> void:
+	if ragdoll == null:
+		return
+	var p := ragdoll.torso_position()
+	global_position = Vector3(clampf(p.x, -Court.HALF_LEN - 1.5, Court.HALF_LEN + 1.5), 0.0, clampf(p.z, -Court.HALF_WID - 1.5, Court.HALF_WID + 1.5))
+
+
+func _get_up() -> void:
+	if ragdoll != null:
+		_follow_ragdoll()
+		ragdoll.queue_free()
+		ragdoll = null
+	body_root.visible = true
+	body_root.rotation = Vector3.ZERO
+	body_root.position = Vector3.ZERO
+	label.visible = true
+	_stagger = 0.0
+
+
+# ---------------------------------------------------------------- celebration
+
+## Manager: the game is won; go here and do as the phase says.
+func cheer(spot: Vector3) -> void:
+	celebrating = true
+	celeb_spot = spot
+	_celeb_t = rng.randf() * 2.0
+	_dodge_timer = 0.0
+	_windup = 0.0
+	if ragdoll != null:
+		_get_up()
+
+
+func _celebrate(delta: float) -> void:
+	var phase: String = manager.celebration_phase
+	_celeb_t += delta
+	action = phase
+	if phase == "gather":
+		_walk(delta, celeb_spot, 1.0)
+		body_root.rotation = Vector3.ZERO
+		body_root.position = Vector3.ZERO
+		_animate(delta)
+	elif phase == "dance":
+		velocity = Vector3.ZERO
+		_face(Vector3(-_sign() * 6.0, 0, global_position.z), delta)  # face the losers
+		var beat: float = manager.dance_clock
+		body_root.rotation.y = sin(beat * 6.0) * 0.55
+		body_root.rotation.z = sin(beat * 3.0) * 0.18
+		body_root.position.y = absf(sin(beat * 6.0)) * 0.18
+		arm_l.rotation.x = -2.6 + sin(beat * 6.0) * 0.5
+		arm_r.rotation.x = -2.6 - sin(beat * 6.0) * 0.5
+		leg_l.rotation.x = sin(beat * 6.0) * 0.3
+		leg_r.rotation.x = -sin(beat * 6.0) * 0.3
+	elif phase == "moon":
+		# up to the line, backs to the beaten, bend over
+		var d := celeb_spot - global_position
+		d.y = 0.0
+		if d.length() > 0.3:
+			_walk(delta, celeb_spot, 1.0)
+			body_root.rotation = Vector3.ZERO
+			body_root.position = Vector3.ZERO
+			_animate(delta)
+		else:
+			velocity = Vector3.ZERO
+			_face(Vector3(_sign() * 20.0, 0, global_position.z), delta)  # back to the enemy half
+			body_root.rotation.x = lerpf(body_root.rotation.x, 1.25, delta * 5.0)  # bent double
+			body_root.rotation.z = sin(_celeb_t * 9.0) * 0.12                       # a waggle
+			body_root.position.y = -0.15
+			body_root.position.z = 0.25
+			arm_l.rotation.x = 0.4
+			arm_r.rotation.x = 0.4
+			leg_l.rotation.x = 0.0
+			leg_r.rotation.x = 0.0
+	else:
+		velocity = Vector3.ZERO
+		body_root.rotation = Vector3.ZERO
+		body_root.position = Vector3.ZERO
+		_animate(delta)
 
 
 ## Manager: this player is out, wait here.
@@ -808,3 +978,6 @@ func cleanup() -> void:
 	if held != null:
 		held.holder = null
 		held = null
+	if ragdoll != null and is_instance_valid(ragdoll):
+		ragdoll.queue_free()
+		ragdoll = null

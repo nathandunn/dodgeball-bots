@@ -6,6 +6,8 @@ extends Node
 
 signal match_started(match_index: int)
 signal match_ended(result: Dictionary)
+signal dance_started(match_index: int)
+signal celebration_finished(match_index: int)
 
 const TEAM_SIZE := 6
 const BALLS := 6
@@ -32,6 +34,17 @@ var stats := {}
 var player_stats := {}
 var rng := RandomNumberGenerator.new()
 var _burden := [0.0, 0.0]
+# the winners' celebration: "" -> gather -> dance -> moon -> done
+const GATHER_CAP := 6.0
+const DANCE_TIME := 3.0
+const MOON_WALK_CAP := 5.0
+const MOON_TIME := 3.5
+var celebrating := false
+var celebration_phase := ""
+var dance_clock := 0.0
+var _phase_timer := 0.0
+var _celebrants: Array[Player] = []
+var _winner := -1
 
 
 func start_match(seed_value: int = -1) -> void:
@@ -120,6 +133,9 @@ func _assign_rush() -> void:
 
 func clear() -> void:
 	running = false
+	celebrating = false
+	celebration_phase = ""
+	_celebrants.clear()
 	for p in players:
 		p.cleanup()
 		p.queue_free()
@@ -130,6 +146,9 @@ func clear() -> void:
 
 
 func _physics_process(delta: float) -> void:
+	if celebrating:
+		_run_celebration(delta)
+		return
 	if not running:
 		return
 	elapsed += delta
@@ -220,6 +239,8 @@ func player_entered(p: Player) -> void:
 
 func _finish(winner: int, reason: String) -> void:
 	running = false
+	if winner >= 0:
+		_begin_celebration(winner)
 	var res := {
 		"match": match_index, "winner": winner, "reason": reason, "duration": elapsed,
 		"winner_name": TEAM_NAMES[winner] if winner >= 0 else "Nobody",
@@ -228,6 +249,59 @@ func _finish(winner: int, reason: String) -> void:
 		"stats": stats.duplicate(true), "players": player_stats.values(),
 	}
 	match_ended.emit(res)
+
+
+# ---------------------------------------------------------------- celebration
+
+func _begin_celebration(winner: int) -> void:
+	_winner = winner
+	_celebrants.clear()
+	for p in players:
+		if p.team == winner and not p.out:
+			_celebrants.append(p)
+	if _celebrants.is_empty():
+		return
+	celebrating = true
+	celebration_phase = "gather"
+	_phase_timer = 0.0
+	dance_clock = 0.0
+	var sgn := -1.0 if winner == 0 else 1.0
+	for i in _celebrants.size():
+		var z := lerpf(-2.4, 2.4, float(i) / maxf(_celebrants.size() - 1, 1))
+		_celebrants[i].cheer(Vector3(sgn * (Court.ATTACK + 0.8), 0, z))
+
+
+func _run_celebration(delta: float) -> void:
+	_phase_timer += delta
+	match celebration_phase:
+		"gather":
+			var all_there := true
+			for p in _celebrants:
+				if p.global_position.distance_to(p.celeb_spot) > 0.5:
+					all_there = false
+			if all_there or _phase_timer > GATHER_CAP:
+				celebration_phase = "dance"
+				_phase_timer = 0.0
+				dance_clock = 0.0
+				dance_started.emit(match_index)
+		"dance":
+			dance_clock += delta
+			if _phase_timer > DANCE_TIME:
+				celebration_phase = "moon"
+				_phase_timer = 0.0
+				var sgn := -1.0 if _winner == 0 else 1.0
+				for i in _celebrants.size():
+					var z := lerpf(-3.0, 3.0, float(i) / maxf(_celebrants.size() - 1, 1))
+					_celebrants[i].celeb_spot = Vector3(sgn * (Court.NEUTRAL + 0.7), 0, z)
+		"moon":
+			var all_there := true
+			for p in _celebrants:
+				if p.global_position.distance_to(p.celeb_spot) > 0.5:
+					all_there = false
+			if (all_there and _phase_timer > MOON_TIME) or _phase_timer > MOON_WALK_CAP + MOON_TIME:
+				celebration_phase = "done"
+				celebrating = false
+				celebration_finished.emit(match_index)
 
 
 func _fresh_stats() -> Dictionary:
@@ -239,6 +313,8 @@ func _fresh_stats() -> Dictionary:
 
 func note_hit_distance(d: float) -> void:
 	var k := str(int(d / 3.0) * 3)
+	if not stats["dist"].has(k):
+		stats["dist"][k] = [0, 0]  # a deflected ball can hit from a bucket no throw was logged in
 	stats["dist"][k][1] = int(stats["dist"][k][1]) + 1
 
 

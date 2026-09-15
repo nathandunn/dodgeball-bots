@@ -25,6 +25,8 @@ func _ready() -> void:
 	manager.world = self
 	manager.court = court
 	manager.match_ended.connect(_on_match_ended)
+	manager.dance_started.connect(_on_dance_started)
+	manager.celebration_finished.connect(_on_celebration_finished)
 	add_child(manager)
 
 	var args := _parse_args(OS.get_cmdline_user_args())
@@ -87,6 +89,11 @@ func _ready() -> void:
 	hud.pause_toggled.connect(func(p: bool): get_tree().paused = p)
 	hud.process_mode = Node.PROCESS_MODE_ALWAYS
 	cam.process_mode = Node.PROCESS_MODE_ALWAYS
+	if OS.has_feature("web"):
+		# ?speed=0.25 for slow motion (screenshots, gifs)
+		var q: String = str(JavaScriptBridge.eval("new URLSearchParams(location.search).get('speed') || ''", true))
+		if q.is_valid_float() and float(q) > 0.0:
+			set_sim_speed(clampf(float(q), 0.05, 8.0))
 	_start_next()
 
 
@@ -113,7 +120,7 @@ func _setup_ui_scale() -> void:
 
 func set_sim_speed(s: float) -> void:
 	Engine.time_scale = s
-	Engine.physics_ticks_per_second = int(round(60.0 * s))
+	Engine.physics_ticks_per_second = maxi(int(round(60.0 * s)), 12)
 	Engine.max_physics_steps_per_frame = maxi(8, int(s * 4.0))
 
 
@@ -170,11 +177,32 @@ func _process(delta: float) -> void:
 			_dbg_t = 0.0
 			var parts := PackedStringArray()
 			for p in manager.players:
-				parts.append("%s %s (%.1f,%.1f) %s%s" % [p.player_name, p.action, p.global_position.x, p.global_position.z, "B" if p.held != null else "-", "!" if p.out else ""])
+				parts.append("%s %s (%.1f,%.1f) %s%s%s%s%s" % [p.player_name, p.action, p.global_position.x, p.global_position.z, "B" if p.held != null else "-", "!" if p.out else "", "~" if p.inbound else "", "R" if p.ragdoll != null else "", "" if p.on_court else "^"])
 			var bp := PackedStringArray()
 			for b in manager.balls:
 				bp.append("(%.1f,%.1f %s)" % [b.global_position.x, b.global_position.z, "live" if b.live else ("held" if b.holder != null else "idle")])
 			print("t=%d " % int(manager.elapsed) + " | ".join(parts) + "  balls " + " ".join(bp))
+	if cam != null and manager != null and manager.celebrating:
+		var c := Vector3.ZERO
+		var n := 0
+		for p in manager.players:
+			if p.celebrating:
+				c += p.global_position
+				n += 1
+		if n > 0:
+			# the results panel covers the right half (landscape) or the bottom (portrait):
+			# put the winners in the part of the screen that is still visible
+			var f := c / n
+			var b := cam.camera_basis()
+			var vs := get_viewport().get_visible_rect().size
+			if hud != null and hud.results_overlay.visible:
+				if vs.x > vs.y:
+					f += Vector3(b.x.x, 0, b.x.z).normalized() * 4.5   # subject to screen-left
+				else:
+					f += Vector3(b.z.x, 0, b.z.z).normalized() * 3.5   # subject to screen-top
+			cam.set_focus(f, 14.0)
+	elif cam != null:
+		cam.clear_focus()
 	if _restart_timer > 0.0:
 		_restart_timer -= delta
 		if _restart_timer <= 0.0:
@@ -182,6 +210,8 @@ func _process(delta: float) -> void:
 
 
 func _on_match_ended(result: Dictionary) -> void:
+	if not headless:
+		print("game %d: %s by %s in %ds (left %d-%d)" % [result["match"], result["winner_name"], result["reason"], int(result["duration"]), result["alive"][0], result["alive"][1]])
 	if batch_left > 0:
 		batch_left -= 1
 		batch_results.append(result)
@@ -198,6 +228,9 @@ func _on_match_ended(result: Dictionary) -> void:
 			for pp in batch_results[-1]["players"]:
 				print("  %s %s/%s throws=%d hits=%d catches=%d drops=%d blocks=%d dodges=%d out=%d" % [pp["name"], pp["persona"], pp["build"], pp["throws"], pp["hits"], pp["catches"], pp["drops"], pp["blocks"], pp["dodges"], pp["times_out"]])
 			print("SUMMARY " + JSON.stringify(summary["data"]))
+			if OS.has_environment("DBCELEB") and manager.celebrating:
+				get_tree().create_timer(30.0).timeout.connect(func(): print("celebration: CAP HIT in phase %s" % manager.celebration_phase); get_tree().quit())
+				return
 			get_tree().quit()
 			return
 		hud.show_batch(summary)
@@ -206,10 +239,37 @@ func _on_match_ended(result: Dictionary) -> void:
 		return
 	if hud != null:
 		_last_result = result
+		_results_shown_for = -1
 		hud.set_status("Game over - %s" % (result["winner_name"] + " win" if result["winner"] >= 0 else "a draw"))
-		get_tree().create_timer(1.2).timeout.connect(func(): hud.show_result(result))
+		if result["winner"] < 0 or not manager.celebrating:
+			get_tree().create_timer(1.2).timeout.connect(func(): _show_results(result["match"]))
+		else:
+			# the panel comes up as the dance starts; a safety timer in case the winners dawdle
+			get_tree().create_timer(GATHER_SAFETY).timeout.connect(func(): _show_results(result["match"]))
 	elif headless:
 		print(JSON.stringify(result))
+
+
+const GATHER_SAFETY := 9.0
+var _results_shown_for := -1
+
+func _show_results(idx: int) -> void:
+	if hud == null or _last_result.is_empty() or _results_shown_for == idx or idx != manager.match_index or manager.running:
+		return
+	_results_shown_for = idx
+	hud.show_result(_last_result)
+
+
+func _on_dance_started(idx: int) -> void:
+	if batch_left > 0:
+		return
+	_show_results(idx)
+
+
+func _on_celebration_finished(idx: int) -> void:
+	if headless and OS.has_environment("DBCELEB"):
+		print("celebration finished for game %d" % idx)
+		get_tree().quit()
 
 
 func _summarize(results: Array[Dictionary]) -> Dictionary:

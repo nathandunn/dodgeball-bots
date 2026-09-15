@@ -39,6 +39,10 @@ func _process(delta: float) -> void:
 	_apply()
 
 
+func camera_basis() -> Basis:
+	return _cam.global_transform.basis
+
+
 func set_focus(point: Vector3, want_dist: float = -1.0) -> void:
 	_focus_target = Vector3(point.x, 1.0, point.z)
 	_focus_dist = want_dist
